@@ -1,23 +1,30 @@
 package ccache
 
 import (
-	"io/ioutil"
-	"net/url"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
+
+	"github.com/Curricane/ccache/consistenthash"
 )
 
 const (
-	defaultBasePath = "/_ccache/"
+	defaultBasePath  = "/_ccache/"
 	defaultResplicas = 50
 )
+
 // HTTPPool implements PeerPicker for a pool of HTTP peers.
 type HTTPPool struct {
 	// this peer's base URL, e.g. "https://example.net:8000"
-	self     string
-	basePath string // 节点间通讯地址的前缀，默认是 /_ccache/
+	self        string
+	basePath    string                 // 节点间通讯地址的前缀，默认是 /_ccache/
+	mu          sync.Mutex             // guards peers and httpGetters
+	peers       *consistenthash.Map    // 用于节点选择
+	httpGetters map[string]*httpGetter // 映射远程节点与对应的 httpGetter。每一个远程节点对应一个 httpGette
 }
 
 // NewHTTPPool initializes an HTTP pool of peers.
@@ -68,6 +75,32 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Write(view.ByteSlice()) // 复制一份再传输
 }
 
+// Set updates the pool's list of peers.
+func (p *HTTPPool) Set(peers ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.peers = consistenthash.New(defaultResplicas, nil)
+	p.peers.Add(peers...)
+	p.httpGetters = make(map[string]*httpGetter, len(peers))
+	for _, peer := range peers {
+		p.httpGetters[peer] = &httpGetter{baseURL: peer + p.basePath}
+	}
+}
+
+// PickPeer picks a peer according to key
+func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if peer := p.peers.Get(key); peer != "" && peer != p.self {
+		p.Log("Pick peer %s", peer)
+		return p.httpGetters[peer], true
+	}
+	return nil, false
+}
+
+var _ PeerPicker = (*HTTPPool)(nil)
+
 // 创建具体的 HTTP 客户端类 httpGetter，实现 PeerGetter 接口
 type httpGetter struct {
 	baseURL string // 将要访问的远程节点的地址，例如 http://example.com/_geecache/。
@@ -80,7 +113,7 @@ func (h *httpGetter) Get(group string, key string) ([]byte, error) {
 		"%v%v/%v",
 		h.baseURL,
 		url.QueryEscape(group),
-		url.QueryEscape(key)
+		url.QueryEscape(key),
 	)
 
 	res, err := http.Get(u)
