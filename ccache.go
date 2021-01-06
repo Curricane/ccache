@@ -5,6 +5,8 @@ import (
 	"log"
 	"sync"
 
+	pb "github.com/Curricane/ccache/ccachepb"
+
 	"github.com/Curricane/ccache/singleflight"
 )
 
@@ -119,11 +121,18 @@ func (g *Group) populateCache(key string, value ByteView) {
 
 // getFromPeer 从节点中获取数据
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
-	bytes, err := peer.Get(g.name, key)
+	req := &pb.Request{
+		Group: g.name,
+		Key:   key,
+	}
+
+	res := &pb.Response{}
+
+	err := peer.Get(req, res)
 	if err != nil {
 		return ByteView{}, err
 	}
-	return ByteView{b: bytes}, nil
+	return ByteView{b: res.Value}, nil
 }
 
 // RegisterPeers registers a PeerPicker for choosing remote peer
